@@ -1,0 +1,153 @@
+---
+title: "Residual Sugar, Density and Quality in Red Wine"
+author: "Sumit Kashid"
+date: "2025-10-15"
+output:
+  html_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data
+
+The UCI Wine Quality dataset (red wine, 1,599 samples, 11 physicochemical
+measurements plus a quality score from 0 to 10). The file is downloaded on
+first run if it is not already in `data/`.
+
+```{r load-data}
+data_path <- "data/winequality-red.csv"
+if (!file.exists(data_path)) {
+  dir.create("data", showWarnings = FALSE)
+  download.file(
+    "https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-red.csv",
+    data_path
+  )
+}
+
+wine <- read.csv(data_path, sep = ";", stringsAsFactors = FALSE)
+summary(wine$residual.sugar)
+head(wine[, c("residual.sugar", "density")])
+```
+
+## Part 1: Two groups (median split)
+
+Wines are split at the median residual sugar (2.2 g/L) into Group A (at or
+below the median) and Group B (above it).
+
+```{r median-split}
+rs_median <- median(wine$residual.sugar, na.rm = TRUE)
+sugar_group <- factor(
+  ifelse(wine$residual.sugar <= rs_median, 0, 1),
+  levels = c(0, 1),
+  labels = c("A (<= median)", "B (> median)")
+)
+table(sugar_group)
+tapply(wine$density, sugar_group, mean, na.rm = TRUE)
+```
+
+**Null hypothesis.** H0: mu_A = mu_B. Mean density is the same in both groups.
+
+```{r median-boxplot}
+boxplot(density ~ sugar_group, data = wine,
+        main = "Density by residual sugar (median split)",
+        xlab = "Group", ylab = "Density")
+```
+
+The median and interquartile range for Group B sit above Group A, so the null
+already looks unlikely from the plot.
+
+**Test.** Welch two sample t test, which does not assume equal variances.
+
+```{r welch-t}
+t_res <- t.test(wine$density ~ sugar_group, var.equal = FALSE)
+t_res
+
+# Same p value computed directly from the t distribution
+2 * pt(-abs(t_res$statistic), df = t_res$parameter)
+```
+
+**Result.** t is about -14.70 on roughly 1,365 degrees of freedom, with p well
+below 0.001. H0 is rejected at any conventional alpha. Wines above the median
+residual sugar are denser on average, which points to an association between
+residual sugar and density.
+
+## Part 2: Four groups (quartiles)
+
+```{r quartile-groups}
+qs <- quantile(wine$residual.sugar, probs = c(0, .25, .50, .75, 1), na.rm = TRUE)
+sugar_quartile <- cut(
+  wine$residual.sugar,
+  breaks = qs,
+  include.lowest = TRUE,
+  labels = c("A (Q1)", "B (Q2)", "C (Q3)", "D (Q4)")
+)
+table(sugar_quartile)
+```
+
+**Null hypothesis.** H0: mu_A = mu_B = mu_C = mu_D.
+
+```{r quartile-boxplot}
+boxplot(wine$density ~ sugar_quartile,
+        main = "Density by residual sugar quartile",
+        xlab = "Quartile", ylab = "Density")
+```
+
+Group medians move upward from A to D.
+
+```{r anova}
+aov_fit <- aov(wine$density ~ sugar_quartile)
+summary(aov_fit)
+p_anova <- summary(aov_fit)[[1]][["Pr(>F)"]][1]
+p_anova
+```
+
+**Result.** One way ANOVA rejects H0. Density rises steadily across the
+quartiles, which strengthens the Part 1 finding. Going to many more groups
+(deciles, for example) would not help much here: each group gets smaller, power
+drops and the number of comparisons grows. Quartiles are a reasonable balance.
+
+## Part 3: Residual sugar vs. "excellent" wine
+
+A wine is labeled excellent if its quality score is 7 or higher.
+
+**Hypotheses.** H0: sugar quartile and excellence are independent.
+H1: they are associated.
+
+```{r chi-square}
+excellent <- factor(ifelse(wine$quality >= 7, "yes", "no"), levels = c("yes", "no"))
+con_tab <- table(sugar_quartile, excellent)
+addmargins(con_tab)
+
+chi_out <- chisq.test(con_tab, correct = FALSE)
+chi_out
+```
+
+### Permutation check
+
+The chi square p value is checked against a permutation test that shuffles the
+excellent labels 2,000 times.
+
+```{r permutation}
+set.seed(42)
+B <- 2000
+obs_chi <- as.numeric(chi_out$statistic)
+perm_stat <- numeric(B)
+
+for (b in seq_len(B)) {
+  excellent_perm <- sample(excellent)
+  perm_stat[b] <- as.numeric(
+    chisq.test(table(sugar_quartile, excellent_perm), correct = FALSE)$statistic
+  )
+}
+
+p_perm <- mean(perm_stat >= obs_chi)
+c(chi_square_p = chi_out$p.value, permutation_p = p_perm)
+```
+
+**Result.** Both tests give p of about 0.14 (chi square 0.139, permutation
+0.137), so independence is not rejected at alpha = 0.05. Residual sugar is
+strongly tied to density but shows no meaningful link to whether a wine is
+rated excellent.

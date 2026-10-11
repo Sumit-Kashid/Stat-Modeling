@@ -1,0 +1,5 @@
+data/
+*.html
+.Rhistory
+.RData
+.Rproj.user/
